@@ -5,8 +5,8 @@ from collections import Counter
 # We check both sites to see if they share the same structure
 URLS = [
     "https://www.propertypal.com/property-to-rent/bt7/bedrooms-4-4",
-    "https://www.university-area-properties.com/search?bedroom_min=4&bedroom_max=4&listing_type=let&view=list"
-    # Likely search URL
+    "https://www.university-area-properties.com/search?bedroom_min=4&bedroom_max=4&listing_type=let&view=list",
+    "https://www.propertynews.com/property-to-rent/bt7/bedrooms-4-4/price-1800"
 ]
 
 
