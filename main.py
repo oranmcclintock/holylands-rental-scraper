@@ -1,4 +1,4 @@
-import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 import sqlite3
 import time
@@ -6,27 +6,39 @@ import schedule
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
-# Get secrets from the hidden file
+# --- CONFIGURATION & SECRETS ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ENV_PATH = os.path.join(BASE_DIR, '.env')
+load_dotenv(ENV_PATH)
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# --- CONFIGURATION ---
-URL_TO_SCRAPE = "https://www.propertypal.com/property-to-rent/bt7/bedrooms-4-4/price-1800"
-DB_FILE = "seen_properties.db"
+if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    print(f"ERROR: Could not load secrets from {ENV_PATH}")
+    exit(1)
 
-# Headers to make the bot look like a real browser
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-}
+DB_FILE = os.path.join(BASE_DIR, 'seen_properties.db')
+
+# URLs
+URL_PROPERTYPAL = "https://www.propertypal.com/property-to-rent/bt7/bedrooms-4-4/price-1800"
+URL_UNI_AREA = "https://www.university-area-properties.com/grid/property-for-rent/bt7/bedrooms-4-4/price-1800"
+
 
 # --- DATABASE FUNCTIONS ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS properties (id TEXT PRIMARY KEY)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS properties
+                 (
+                     id
+                     TEXT
+                     PRIMARY
+                     KEY
+                 )''')
     conn.commit()
     conn.close()
+
 
 def is_seen(property_id):
     conn = sqlite3.connect(DB_FILE)
@@ -36,6 +48,7 @@ def is_seen(property_id):
     conn.close()
     return exists
 
+
 def save_property(property_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -43,8 +56,10 @@ def save_property(property_id):
     conn.commit()
     conn.close()
 
-# --- TELEGRAM FUNCTION ---
+
+# --- TELEGRAM FUNCTIONS ---
 def send_telegram_alert(message):
+    import requests
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -53,91 +68,135 @@ def send_telegram_alert(message):
         "disable_web_page_preview": False
     }
     try:
-        response = requests.post(url, json=payload)
-        if response.status_code == 200:
-            print("  -> Telegram message sent!")
-        else:
-            print(f"  -> Telegram Error {response.status_code}: {response.text}")
+        requests.post(url, json=payload)
     except Exception as e:
-        print(f"  -> Failed to send Telegram message: {e}")
+        print(f"Telegram Fail: {e}")
+
+
+# NEW: Plain Text Formatter (No Emojis)
+def format_message(source_name, info_text, link):
+    return (
+        f"<b>NEW RENTAL FOUND</b>\n"
+        f"Source: {source_name}\n\n"
+        f"{info_text}\n\n"
+        f"<a href='{link}'>View Listing</a>"
+    )
+
 
 # --- TEXT CLEANER ---
-def clean_property_text(text):
-    """Removes junk words that get scraped from buttons."""
-    junk_words = ["Hide", "Save", "Email", "Call", "Contact"]
-
-    # 1. Replace junk words with nothing
-    for word in junk_words:
+def clean_text(text):
+    junk = ["Hide", "Save", "Email", "Call", "Contact", "More Details"]
+    for word in junk:
         text = text.replace(word, "")
-
-    # 2. Remove extra spaces created by the removal
     return " ".join(text.split())
 
-# --- SCRAPING LOGIC ---
-def check_for_rentals():
-    print(f"Checking {URL_TO_SCRAPE}...")
+
+# --- SCRAPER 1: PROPERTYPAL ---
+def scrape_propertypal(scraper):
+    print(f"  --> Scanning PropertyPal...")
     try:
-        response = requests.get(URL_TO_SCRAPE, headers=HEADERS)
+        response = scraper.get(URL_PROPERTYPAL)
         if response.status_code != 200:
-            print(f"Error: Status code {response.status_code}")
-            return
+            print(f"  Error {response.status_code}")
+            return 0
 
         soup = BeautifulSoup(response.text, 'html.parser')
         listings = soup.find_all(class_='pp-property-box')
 
-        new_count = 0
-
+        count = 0
         for listing in listings:
             try:
-                # 1. Extract Link and ID
                 link_tag = listing.find('a')
                 if not link_tag: continue
 
-                relative_link = link_tag['href']
-                full_link = "https://www.propertypal.com" + relative_link
-                property_id = relative_link.split('/')[-1]
+                rel_link = link_tag['href']
+                full_link = "https://www.propertypal.com" + rel_link
+                p_id = rel_link.split('/')[-1]
 
-                # 2. Extract & Clean Info
-                # separator=' ' prevents "month29" mashups
-                raw_text = link_tag.get_text(separator=' ', strip=True)
-                clean_info = clean_property_text(raw_text)
+                info = clean_text(link_tag.get_text(separator=' ', strip=True))
 
-                # 3. Check Database
-                if not is_seen(property_id):
-                    print(f"Found new property: {property_id}")
+                if not is_seen(p_id):
+                    print(f"    Found New (PP): {p_id}")
 
-                    # New Clean Message Format
-                    msg = (
-                        f"<b>NEW RENTAL FOUND</b>\n\n"
-                        f"{clean_info}\n\n"
-                        f"<b>Link:</b> {full_link}"
-                    )
+                    msg = format_message("PropertyPal", info, full_link)
 
                     send_telegram_alert(msg)
-                    save_property(property_id)
-                    new_count += 1
-
-                    time.sleep(1)
-
-            except Exception as e:
-                print(f"Error parsing item: {e}")
+                    save_property(p_id)
+                    count += 1
+                    time.sleep(2)
+            except:
                 continue
-
-        print(f"Check complete. Found {new_count} new properties.")
-
+        return count
     except Exception as e:
-        print(f"Scraping error: {e}")
+        print(f"  PropertyPal Error: {e}")
+        return 0
 
-# --- MAIN EXaECUTION ---
+
+# --- SCRAPER 2: UNIVERSITY AREA PROPERTIES ---
+def scrape_uni_area(scraper):
+    print(f"  --> Scanning University Area Properties...")
+    try:
+        response = scraper.get(URL_UNI_AREA)
+        if response.status_code != 200:
+            print(f"  Error {response.status_code}")
+            return 0
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        listings = soup.find_all(class_='list-item')
+
+        count = 0
+        for listing in listings:
+            try:
+                link_tag = listing.find('a')
+                if not link_tag: continue
+
+                rel_link = link_tag['href']
+                if "http" in rel_link:
+                    full_link = rel_link
+                else:
+                    full_link = "https://www.university-area-properties.com" + rel_link
+
+                p_id = full_link
+                info = clean_text(listing.get_text(separator=' ', strip=True))
+
+                if not is_seen(p_id):
+                    print(f"    Found New (UAP): {p_id}")
+
+                    msg = format_message("Uni Area Properties", info, full_link)
+
+                    send_telegram_alert(msg)
+                    save_property(p_id)
+                    count += 1
+                    time.sleep(2)
+            except:
+                continue
+        return count
+    except Exception as e:
+        print(f"  Uni Area Error: {e}")
+        return 0
+
+
+# --- MAIN CONTROLLER ---
+def job():
+    print("\nStarting scan cycle...")
+    scraper = cloudscraper.create_scraper()
+
+    pp_count = scrape_propertypal(scraper)
+    uni_count = scrape_uni_area(scraper)
+
+    print(f"Cycle complete. New: {pp_count} (PP) | {uni_count} (UAP)")
+
+
 if __name__ == "__main__":
     init_db()
-    print("Bot started...")
+    print("Bot started (Universal Mode)...")
+    print(f"Looking for .env in: {BASE_DIR}")
 
     # Run once immediately
-    check_for_rentals()
+    job()
 
-    # Schedule to run every 30 minutes
-    schedule.every(30).minutes.do(check_for_rentals)
+    # Schedule every 60 mins
+    schedule.every(60).minutes.do(job)
 
     while True:
         schedule.run_pending()
