@@ -196,7 +196,7 @@ if __name__ == "__main__":
     job()
 
     # Schedule every 60 mins
-    schedule.every(60).minutes.do(job)
+    schedule.every(15).minutes.do(job)
 
     while True:
         schedule.run_pending()
