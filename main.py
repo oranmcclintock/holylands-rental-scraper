@@ -4,30 +4,28 @@ import sqlite3
 import time
 import schedule
 import os
-import re
+import re  # Added Regex for finding prices/numbers
+import config
 from dotenv import load_dotenv
 
-# --- CONFIGURATION & SECRETS ---
+# --- CONFIGURATION ---
+DEBUG_MODE = False  # Set to False to send Telegram messages
+
+# --- SETUP ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(BASE_DIR, '.env')
 load_dotenv(ENV_PATH)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+DB_FILE = os.path.join(BASE_DIR, config.DB_FILE)
 
-if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-    print(f"ERROR: Could not load secrets from {ENV_PATH}")
+if not DEBUG_MODE and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
+    print("❌ ERROR: Secrets missing in .env")
     exit(1)
 
-DB_FILE = os.path.join(BASE_DIR, 'seen_properties.db')
 
-# --- URLs (Updated with your BT7 Filters) ---
-URL_PROPERTYPAL = "https://www.propertypal.com/property-to-rent/bt7/bedrooms-4-4/price-1800"
-URL_UNI_AREA = "https://www.university-area-properties.com/grid/property-for-rent/bt7/bedrooms-4-4/price-1800"
-URL_PROPERTYNEWS = "https://www.propertynews.com/property-to-rent/bt7/bedrooms-4-4/price-1800"
-
-
-# --- DATABASE FUNCTIONS ---
+# --- DATABASE ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -59,189 +57,194 @@ def save_property(fingerprint):
     conn.close()
 
 
-# --- HELPER FUNCTIONS ---
+# --- HELPERS ---
 def create_fingerprint(address_text):
-    """
-    Creates a unique ID from the address to stop duplicates.
-    Example: "29 Carmel Street, Belfast" -> "29carmel"
-    """
     clean = address_text.lower()
-    for word in ["belfast", "bt7", "street", "st", "road", "rd", "avenue", "ave", ",", "."]:
+    for word in ["belfast", "bt7", "street", "st", "road", "rd", "ave", "avenue", ",", ".", "property"]:
         clean = clean.replace(word, "")
     clean = "".join(c for c in clean if c.isalnum())
     return clean[:15]
 
 
-def clean_text(text):
-    junk = ["Hide", "Save", "Email", "Call", "Contact", "More Details", "Property", "Added"]
-    for word in junk:
-        text = text.replace(word, "")
-    return " ".join(text.split())
+def fix_link(base_url, href):
+    if href.startswith("http"): return href
+    parts = base_url.split("/")
+    domain = f"{parts[0]}//{parts[2]}"
+    if not href.startswith("/"): href = "/" + href
+    return domain + href
 
 
-def send_telegram_alert(message):
-    import requests
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False
-    }
+def extract_price(text):
+    """Finds price like £1,200 or 1200 in text"""
+    # Look for £ followed by numbers, allowing for commas
+    match = re.search(r'£([\d,]+)', text)
+    if match:
+        return int(match.group(1).replace(',', ''))
+    return 0
+
+
+def extract_beds(text):
+    """Finds bedroom count like '4 bed' or '5 bedrooms'"""
+    # Look for a number followed by 'bed'
+    match = re.search(r'(\d+)\s*bed', text.lower())
+    if match:
+        return int(match.group(1))
+    return 0
+
+
+def is_valid_house(text, href):
+    """The Master Filter: Checks Junk, Location, Price, Beds"""
+    text_lower = text.lower()
+
+    # 1. REMOVE JUNK
+    junk_words = ['instagram', 'login', 'register', 'landlord', 'valuation', 'latest news', 'student rental',
+                  'view details']
+    if any(w in text_lower for w in junk_words): return False
+    if "let agreed" in text_lower or "agreed" in text_lower: return False
+
+    # 2. CHECK LOCATION (Must be BT7/Student Zone)
+    # Exceptions: We ban "Ballygawley" or "Antrim Road"
+    if any(w in text_lower for w in ['ballygawley', 'antrim', 'dungannon', 'bt15', 'bt11']): return False
+
+    valid_locs = ['bt7', 'university', 'holyland', 'stranmillis', 'botanic', 'ormeau', 'fitzroy', 'rugby', 'palestine',
+                  'damascus', 'carmel', 'cairo']
+    if not any(w in text_lower for w in valid_locs): return False
+
+    # 3. CHECK BEDROOMS (From Config)
+    # If text mentions beds, verify count. If no mention, we let it pass (safest).
+    beds_found = extract_beds(text)
+    if beds_found > 0 and beds_found < config.MIN_BEDS:
+        return False  # Too small
+
+    # 4. CHECK PRICE (From Config)
+    # If text mentions price, verify it.
+    price_found = extract_price(text)
+    if price_found > config.MAX_PRICE:
+        return False  # Too expensive
+
+    return True
+
+
+# --- ALERT HANDLER ---
+def handle_new_property(agent, text, link):
+    if DEBUG_MODE:
+        print("-" * 50)
+        print(f"[NEW] Agent: {agent}")
+        print(f"🏠 {text}")
+        print(f"🔗 {link}")
+        print("-" * 50)
+    else:
+        msg = (
+            f"<b>🆕 DIRECT AGENT LISTING</b>\n"
+            f"🏢 <b>{agent}</b>\n\n"
+            f"🏠 {text}\n\n"
+            f"🔗 <a href='{link}'>View on Agent Site</a>"
+        )
+        import requests
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"})
+            print(f"   -> Sent Telegram: {text[:30]}...")
+        except Exception as e:
+            print(f"   -> Telegram Fail: {e}")
+
+
+# --- SCRAPER 1: PROPBOX SITES ---
+def scrape_propbox_site(name, url, scraper):
+    print(f"  --> Scanning {name}...")
     try:
-        requests.post(url, json=payload)
-    except Exception as e:
-        print(f"Telegram Fail: {e}")
+        resp = scraper.get(url, timeout=20)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        items = soup.find_all(class_='PropBox-content')
 
+        for item in items:
+            link_tag = item.find('a')
+            if not link_tag: continue
 
-def format_message(source_name, info_text, link):
-    return (
-        f"<b>NEW RENTAL FOUND</b>\n"
-        f"Source: {source_name}\n\n"
-        f"{info_text}\n\n"
-        f"<a href='{link}'>View Listing</a>"
-    )
+            text = " ".join(item.get_text().split())
+            href = link_tag['href']
 
+            if len(text) < 10: continue
 
-# --- SCRAPER 1: PROPERTYPAL ---
-def scrape_propertypal(scraper):
-    print(f"  --> Scanning PropertyPal...")
-    try:
-        response = scraper.get(URL_PROPERTYPAL)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        listings = soup.find_all(class_='pp-property-box')
-        count = 0
-        for listing in listings:
-            try:
-                link_tag = listing.find('a')
-                if not link_tag: continue
-
-                full_link = "https://www.propertypal.com" + link_tag['href']
-                info = clean_text(link_tag.get_text(separator=' ', strip=True))
-
-                fingerprint = create_fingerprint(info)
+            if is_valid_house(text, href):
+                full_link = fix_link(url, href)
+                fingerprint = create_fingerprint(text)
 
                 if not is_seen(fingerprint):
-                    print(f"    Found New (PP): {fingerprint}")
-                    msg = format_message("PropertyPal", info, full_link)
-                    send_telegram_alert(msg)
+                    handle_new_property(name, text, full_link)
                     save_property(fingerprint)
-                    count += 1
-                    time.sleep(2)
-            except:
-                continue
-        return count
     except Exception as e:
-        print(f"  PropertyPal Error: {e}")
-        return 0
+        print(f"    ❌ Error: {e}")
 
 
-# --- SCRAPER 2: UNIVERSITY AREA ---
-def scrape_uni_area(scraper):
-    print(f"  --> Scanning Uni Area...")
+# --- SCRAPER 2: CUSTOM SITES ---
+def scrape_custom_site(name, url, scraper):
+    print(f"  --> Scanning {name}...")
     try:
-        response = scraper.get(URL_UNI_AREA)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        listings = soup.find_all(class_='list-item')
-        count = 0
-        for listing in listings:
-            try:
-                link_tag = listing.find('a')
-                if not link_tag: continue
+        resp = scraper.get(url, timeout=20)
+        soup = BeautifulSoup(resp.text, 'html.parser')
 
-                rel_link = link_tag['href']
-                full_link = rel_link if "http" in rel_link else "https://www.university-area-properties.com" + rel_link
-                info = clean_text(listing.get_text(separator=' ', strip=True))
-
-                fingerprint = create_fingerprint(info)
-
-                if not is_seen(fingerprint):
-                    print(f"    Found New (UAP): {fingerprint}")
-                    msg = format_message("Uni Area Properties", info, full_link)
-                    send_telegram_alert(msg)
-                    save_property(fingerprint)
-                    count += 1
-                    time.sleep(2)
-            except:
-                continue
-        return count
-    except Exception as e:
-        print(f"  Uni Area Error: {e}")
-        return 0
-
-
-# --- SCRAPER 3: PROPERTYNEWS (FIXED) ---
-def scrape_propertynews(scraper):
-    print(f"  --> Scanning PropertyNews...")
-    try:
-        response = scraper.get(URL_PROPERTYNEWS)
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        # New Logic: Find ALL links
+        special_cards = soup.find_all(class_=['addr', 'eqh', 'property_row'])
         links = soup.find_all('a', href=True)
 
-        count = 0
-        for link in links:
-            try:
-                href = link['href']
-                # Clean up the link
-                href = href.strip()
+        candidates = []
+        for card in special_cards:
+            link = card.find('a') if card.name != 'a' else card
+            if link and link.has_attr('href'): candidates.append(link)
+        for link in links: candidates.append(link)
 
-                # Logic: Is the last part of the URL a number? (e.g. /1056665)
-                # Split by '/' and take the last part that isn't empty
-                parts = [p for p in href.split('/') if p]
-                if not parts: continue
+        seen_hrefs = set()
 
-                last_part = parts[-1]
+        for link in candidates:
+            href = link['href']
+            if href in seen_hrefs: continue
 
-                # CHECK: Is it a number? (The ID) AND NOT a search price (e.g. price-1800)
-                if last_part.isdigit() and len(last_part) > 5:
+            text = " ".join(link.get_text().split())
+            if len(text) < 10: continue
 
-                    full_link = href if "http" in href else "https://www.propertynews.com" + href
-                    info = clean_text(link.get_text(separator=' ', strip=True))
+            # Basic URL Check first
+            is_standard_url = any(
+                w in href for w in ['/property/', '/details/', '/to-rent/', '/id/', 'gpm', 'properties'])
+            clean_href = href.rstrip('/')
+            is_id_url = clean_href and clean_href[-1].isdigit()
 
-                    # Safety: Ensure the link text isn't empty
-                    if len(info) < 10: continue
-
-                    fingerprint = create_fingerprint(info)
+            if (is_standard_url or is_id_url):
+                if is_valid_house(text, href):
+                    seen_hrefs.add(href)
+                    full_link = fix_link(url, href)
+                    fingerprint = create_fingerprint(text)
 
                     if not is_seen(fingerprint):
-                        print(f"    Found New (PN): {fingerprint}")
-                        msg = format_message("PropertyNews", info, full_link)
-                        send_telegram_alert(msg)
+                        handle_new_property(name, text, full_link)
                         save_property(fingerprint)
-                        count += 1
-                        time.sleep(2)
-            except:
-                continue
-        return count
+
     except Exception as e:
-        print(f"  PropertyNews Error: {e}")
-        return 0
+        print(f"    ❌ Error: {e}")
 
 
 # --- MAIN CONTROLLER ---
 def job():
-    print("\nStarting scan cycle...")
+    print(f"\nStarting Cycle (Debug={DEBUG_MODE})...")
     scraper = cloudscraper.create_scraper()
 
-    pp = scrape_propertypal(scraper)
-    uap = scrape_uni_area(scraper)
-    pn = scrape_propertynews(scraper)
+    # 1. PropBox
+    for name, url in config.PROPBOX_AGENTS.items():
+        scrape_propbox_site(name, url, scraper)
+        time.sleep(1)
 
-    print(f"Cycle complete. New: {pp} (PP) | {uap} (UAP) | {pn} (PN)")
+    # 2. Custom Sites
+    for name, url in config.CUSTOM_AGENTS.items():
+        scrape_custom_site(name, url, scraper)
+        time.sleep(1)
+
+    print("Cycle Complete.")
 
 
 if __name__ == "__main__":
     init_db()
-    print("Bot started (Triple Scraper Mode)...")
-    print(f"Looking for .env in: {BASE_DIR}")
-
-    # Run once on startup
+    print("🚀 Direct Agent Bot Started")
     job()
-
-    # Schedule every 15 mins
-    schedule.every(15).minutes.do(job)
+    schedule.every(config.CHECK_INTERVAL_MINUTES).minutes.do(job)
 
     while True:
         schedule.run_pending()
