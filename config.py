@@ -3,8 +3,8 @@
 # --- USER PREFERENCES ---
 # The bot will IGNORE anything that doesn't match these rules.
 
-MIN_BEDS = 3          # Minimum number of bedrooms
-MAX_PRICE = 2000      # Maximum monthly rent in £
+MIN_BEDS = 4          # Minimum number of bedrooms
+MAX_PRICE = 1800      # Maximum monthly rent in £
 LOCATION_CODE = "bt7" # Postcode area (used for some search links)
 
 # --- SYSTEM SETTINGS ---
