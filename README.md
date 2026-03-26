@@ -4,6 +4,8 @@ This project is a Python-based web scraper designed to monitor various letting a
 
 The scraper is built to handle common anti-bot measures using `cloudscraper` and uses `BeautifulSoup` for parsing HTML. Property data is stored in a SQLite database to prevent duplicate alerts.
 
+<img width="1278" height="903" alt="image" src="https://github.com/user-attachments/assets/d1b6516e-188e-4e22-a1d6-dcd325e959b4" />
+
 ## Features
 
 -   **Automated Scraping:** Periodically scans multiple letting agent websites for new property listings.
@@ -105,4 +107,3 @@ This will attempt to send a test message to your Telegram chat.
 -   `requests`: For making HTTP requests (especially for Telegram API).
 
 ---
-*(Optional: Add a section for Contributing, License, etc. if applicable)*
