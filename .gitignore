@@ -2,3 +2,5 @@
 *.db
 __pycache__/
 .env
+__pycache__/
+seen_properties.db

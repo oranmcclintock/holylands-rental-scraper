@@ -9,7 +9,7 @@ import config
 from dotenv import load_dotenv
 
 # --- CONFIGURATION ---
-DEBUG_MODE = True  # Set to False to send Telegram messages
+DEBUG_MODE = False  # Set to False to send Telegram messages
 
 # --- SETUP ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
